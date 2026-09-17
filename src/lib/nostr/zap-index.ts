@@ -943,6 +943,11 @@ async function retryGiftReplies(args: GiftReplyDeps): Promise<void> {
         await args.store.updateZapReceiptGift(row.receiptEventId, { payerAccountId: null });
         continue;
       }
+      if (parent.parentId !== null) {
+        // Stop awaiting: a reply zap must not nest a gift-reply child.
+        await args.store.updateZapReceiptGift(row.receiptEventId, { payerAccountId: null });
+        continue;
+      }
       const payer = await args.auth.getAccount(row.payerAccountId);
       if (payer === undefined) {
         await args.store.updateZapReceiptGift(row.receiptEventId, { payerAccountId: null });
@@ -989,6 +994,9 @@ async function insertGiftReply(
   });
   const receipt = await args.store.getZapReceiptGift(args.receiptEventId);
   if (receipt === undefined || receipt.giftReplyId !== null) {
+    return;
+  }
+  if (args.parent.parentId !== null) {
     return;
   }
   const pubkey = (await args.auth.getNostrPublicKey(args.payer.id)) ?? '';
