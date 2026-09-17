@@ -445,7 +445,7 @@ Bearer required. Same 401 / 409 / 404 / 503 as `GET /members/:accountId`
 (`members.posts.failed` on 503). Live-only top-level notes by the member,
 newest-first, capped at 200. Body `{ "messages": [...] }` via
 `serializeMessage` like signed-in `GET /messages` (`accountId`,
-`replyCount`, `payable` when `eventId` and a non-blank Lightning Address are set).
+`replyCount`, `payable` when a non-empty `eventId` and a non-blank Lightning Address are set).
 Omits `parentId`. Replies by that member are not listed.
 
 ### `GET /members/:accountId/replies`
@@ -453,7 +453,7 @@ Omits `parentId`. Replies by that member are not listed.
 Bearer required. Same 401 / 409 / 404 / 503 as `GET /members/:accountId`
 (`members.replies.failed` on 503). Live-only replies by the member,
 newest-first, capped at 200. Body `{ "messages": [...] }` via
-`serializeMessage` with `payable` when `eventId` and a non-blank Lightning Address are set, `accountId`, and optional
+`serializeMessage` with `payable` when a non-empty `eventId` and a non-blank Lightning Address are set, `accountId`, and optional
 `parentId` when set; omits `replyCount`. Top-level notes by that member
 are not listed.
 
@@ -2157,8 +2157,9 @@ the top, newest at the bottom above the composer), reversing the array for
 display. Each message exposes the author **name snapshotted at post time**,
 `text` (may be empty when a photo or video is attached), ISO-8601
 `createdAt`, `sats` (validated Lightning receipts on that note, default 0),
-`payable` (true when the note is signed and the author has a non-blank Lightning
-Address), `hasPhoto`, `hasVideo`, `videoContentType` (`null` when
+`payable` (true when the note has a non-empty signed `eventId` and the author
+has a non-blank Lightning Address; null or empty `eventId` is not payable),
+`hasPhoto`, `hasVideo`, `videoContentType` (`null` when
 `hasVideo` is false), live `role` (the author's current `account.role`, or
 `"basis"` if the author is missing; omitted for Damus-only authors), and
 `replyCount` of live 21.gifts-author children (`parent_id` match,
@@ -2218,7 +2219,9 @@ column.
 
 The nostr worker, each tick, queries zap relays (space plus the public
 list, including when `NOSTR_PUBLISH_PUBLIC` is unset) for kind:9735
-receipts whose `e` tag matches a recent note `event_id`. A receipt is
+receipts whose `e` tag matches a non-empty `event_id` from `listLatest`
+or a non-null `listReplies` child of those rows (unioned with open
+conversation zap event ids). Empty `event_id` rows are skipped. A receipt is
 indexed when the signer pubkey matches the author's LNURL-pay
 `nostrPubkey`, the bolt11 amount is at least 1 sat, and the receipt id
 is new. Indexed receipts increment that row's `sats` (GET /messages then
@@ -2412,8 +2415,9 @@ Success → **Response** `200`:
 Missing Bearer → **401** `{ "error": "Unauthorized" }`.
 Payer missing living-room rules → **409** `{ "error": "missing_requirements", "missing": ["rules"] }`.
 Malformed body or `sats` above 10 million → **400** `{ "error": "Expected a JSON body with a positive \"sats\" integer" }`.
-Unknown id → **404** `{ "error": "Not found" }`. Unsigned note, author without a
-non-blank Lightning Address (including whitespace-only), or missing recipient pubkey →
+Unknown id → **404** `{ "error": "Not found" }`. Unsigned note (null or empty
+`eventId`), author without a non-blank Lightning Address (including
+whitespace-only), or missing recipient pubkey →
 **400** `{ "error": "This message cannot be paid yet" }`. Missing KEK →
 **503** `{ "error": "Messages are unavailable" }` (before the limiter).
 Over-limit → **429** `{ "error": "Too many payments" }` (`Retry-After: 10`) —
@@ -2483,7 +2487,7 @@ Public (Bearer optional). Lists **direct live 21.gifts-author replies**
 (`account_id IS NOT NULL`) for parent `:id` oldest-first (`createdAt`
 then `id` ascending), capped at **200**. Unknown-npub (Damus-only)
 children are omitted. Each item is the public message JSON with
-`payable` when `eventId` and a non-blank Lightning Address are set, and no `replyCount`. Unauthenticated items omit
+`payable` when a non-empty `eventId` and a non-blank Lightning Address are set, and no `replyCount`. Unauthenticated items omit
 `accountId`; signed-in replies include `accountId` (21gifts author id).
 Photo and video bytes are never included. `:id` is a UUID
 (`MESSAGE_ID_RE`).
