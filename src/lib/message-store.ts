@@ -12,11 +12,14 @@ import type { SqlClient } from '@/lib/auth/sql';
 import {
   forumContentFingerprint,
   unsignedNostrDefaults,
+  type ForumFeedMode,
   type ForumPhoto,
   type ForumPhotoContentType,
   type MessageRow,
   type NostrPublishState,
 } from '@/lib/message';
+
+export type { ForumFeedMode };
 import { kind1ContentWithHashtags } from '@/lib/nostr/event';
 import { normalizeSignedEvent } from '@/lib/nostr/publish';
 import {
@@ -97,6 +100,20 @@ function pendingKind1LacksBitcoinTag(event: Record<string, unknown> | null): boo
   return !tags.some((tag) => Array.isArray(tag) && tag[0] === 't' && tag[1] === 'bitcoin');
 }
 
+/**
+ * Keyset page query for {@link MessageStore.listFeed}.
+ */
+export type MessageFeedQuery = {
+  /** Page size (1..200). */
+  limit: number;
+  /** Server-side feed filter. */
+  mode: ForumFeedMode;
+  /** Exclusive keyset cursor, or `null` for the first page. */
+  cursor: { k: 't'; c: Date; i: string } | { k: 's'; s: number; c: Date; i: string } | null;
+  /** Founder + moderator account ids; used only when mode==='active'. */
+  staffAccountIds: ReadonlySet<string>;
+};
+
 /** Top-level list row with computed reply count. */
 export interface MessageListRow extends MessageRow {
   /**
@@ -129,6 +146,17 @@ export interface MessageStore {
    * @returns Message list rows (caller-owned copies).
    */
   listLatest(limit: number): Promise<MessageListRow[]>;
+
+  /**
+   * One keyset page of **top-level** live notes (`parent_id IS NULL`,
+   * `deletedAt` null) for GET `/messages`. Same `replyCount` as
+   * {@link listLatest} (live 21.gifts-author direct children). Never
+   * selects `photo` bytea. Replies and soft-hidden rows are excluded.
+   *
+   * @param query - Mode, limit, exclusive cursor, and staff ids (`active` only).
+   * @returns At most `query.limit` list row copies.
+   */
+  listFeed(query: MessageFeedQuery): Promise<MessageListRow[]>;
 
   /**
    * Oldest live 21.gifts-author replies first for a parent note id
@@ -761,6 +789,8 @@ WHERE message.id = ranked.id AND ranked.rn > 1`,
   ON message (account_id, parent_id, content_fp)
   WHERE deleted_at IS NULL AND parent_id IS NOT NULL
     AND account_id IS NOT NULL AND content_fp IS NOT NULL`,
+  `CREATE INDEX IF NOT EXISTS message_feed_created_idx ON message (created_at DESC, id DESC) WHERE parent_id IS NULL AND deleted_at IS NULL`,
+  `CREATE INDEX IF NOT EXISTS message_feed_popular_idx ON message (sats DESC, created_at DESC, id DESC) WHERE parent_id IS NULL AND deleted_at IS NULL AND sats > 0`,
   `DO $unwrap$
    DECLARE
      repair_row RECORD;
@@ -816,6 +846,29 @@ export async function migrateMessageSchema(sql: SqlClient): Promise<void> {
 /** Copy a {@link ForumPhoto} so callers cannot mutate store buffers. */
 function copyPhoto(photo: ForumPhoto): ForumPhoto {
   return { contentType: photo.contentType, bytes: photo.bytes.slice() };
+}
+
+/** Exclusive keyset predicate matching Postgres `(created_at, id) <` / `(sats, created_at, id) <`. */
+function matchesFeedCursor(row: MessageRow, query: MessageFeedQuery): boolean {
+  const cursor = query.cursor;
+  if (cursor === null) {
+    return true;
+  }
+  if (query.mode === 'popular') {
+    if (cursor.k !== 's') {
+      return true;
+    }
+    if (row.sats !== cursor.s) {
+      return row.sats < cursor.s;
+    }
+  } else if (cursor.k !== 't') {
+    return true;
+  }
+  const byTime = row.createdAt.getTime() - cursor.c.getTime();
+  if (byTime !== 0) {
+    return byTime < 0;
+  }
+  return row.id.localeCompare(cursor.i) < 0;
 }
 
 /** Copy a row so callers cannot mutate store internals. */
@@ -922,6 +975,59 @@ export class InMemoryMessageStore implements MessageStore {
     });
     return Promise.resolve(
       sorted.slice(0, limit).map((row) => {
+        const copy = copyRow(row);
+        copy.hasPhoto = this.#photos.has(row.id) || row.hasPhoto === true;
+        copy.hasVideo = row.hasVideo === true;
+        copy.videoContentType = row.videoContentType ?? null;
+        const replyCount = this.#rows.filter(
+          (child) =>
+            child.parentId === row.id && child.deletedAt === null && child.accountId !== null,
+        ).length;
+        return { ...copy, replyCount };
+      }),
+    );
+  }
+
+  /**
+   * Live top-level notes for a forum feed page (`parentId` null, `deletedAt`
+   * null), capped at `query.limit`, with `replyCount` of live 21.gifts-author
+   * children (`deletedAt` null, `accountId` not null).
+   *
+   * @param query - Mode, limit, exclusive keyset cursor, and staff ids.
+   * @returns A new array of list row copies; mutating it does not change the store.
+   */
+  listFeed(query: MessageFeedQuery): Promise<MessageListRow[]> {
+    const topLevel = this.#rows.filter((row) => {
+      if (row.parentId !== null || row.deletedAt !== null) {
+        return false;
+      }
+      if (query.mode === 'unpaid') {
+        return row.sats === 0;
+      }
+      if (query.mode === 'active') {
+        return row.sats > 0 || (row.accountId !== null && query.staffAccountIds.has(row.accountId));
+      }
+      if (query.mode === 'popular') {
+        return row.sats > 0;
+      }
+      return true;
+    });
+    const sorted = [...topLevel].sort((a, b) => {
+      if (query.mode === 'popular') {
+        const bySats = b.sats - a.sats;
+        if (bySats !== 0) {
+          return bySats;
+        }
+      }
+      const byTime = b.createdAt.getTime() - a.createdAt.getTime();
+      if (byTime !== 0) {
+        return byTime;
+      }
+      return b.id.localeCompare(a.id);
+    });
+    const afterCursor = sorted.filter((row) => matchesFeedCursor(row, query));
+    return Promise.resolve(
+      afterCursor.slice(0, query.limit).map((row) => {
         const copy = copyRow(row);
         copy.hasPhoto = this.#photos.has(row.id) || row.hasPhoto === true;
         copy.hasVideo = row.hasVideo === true;
@@ -1907,6 +2013,59 @@ export class PostgresMessageStore implements MessageStore {
        ORDER BY created_at DESC, id DESC
        LIMIT $1`,
       [limit],
+    );
+    return rows.map((row) => ({
+      ...mapMessageRow(row),
+      replyCount: Number(row.reply_count ?? 0),
+    }));
+  }
+
+  /**
+   * One keyset page of live top-level notes from `message`, capped at
+   * `query.limit`, with `replyCount` of live 21.gifts-author children
+   * (`deleted_at IS NULL` and `account_id IS NOT NULL`). Same
+   * {@link MESSAGE_SELECT_COLUMNS} as {@link listLatest} — never the
+   * `photo` bytea column.
+   *
+   * @param query - Mode, limit, exclusive keyset cursor, and staff ids.
+   * @returns Mapped list rows.
+   */
+  async listFeed(query: MessageFeedQuery): Promise<MessageListRow[]> {
+    const params: unknown[] = [query.limit];
+    const filters: string[] = ['parent_id IS NULL', 'deleted_at IS NULL'];
+    let orderBy = 'created_at DESC, id DESC';
+    if (query.mode === 'unpaid') {
+      filters.push('sats = 0');
+    } else if (query.mode === 'active') {
+      params.push([...query.staffAccountIds]);
+      filters.push(`(sats > 0 OR account_id = ANY($${params.length}::uuid[]))`);
+    } else if (query.mode === 'popular') {
+      filters.push('sats > 0');
+      orderBy = 'sats DESC, created_at DESC, id DESC';
+    }
+    if (query.cursor !== null) {
+      if (query.mode === 'popular') {
+        if (query.cursor.k === 's') {
+          params.push(query.cursor.s, query.cursor.c, query.cursor.i);
+          filters.push(
+            `(sats, created_at, id) < ($${params.length - 2}, $${params.length - 1}, $${params.length})`,
+          );
+        }
+      } else if (query.cursor.k === 't') {
+        params.push(query.cursor.c, query.cursor.i);
+        filters.push(`(created_at, id) < ($${params.length - 1}, $${params.length})`);
+      }
+    }
+    const rows = await this.#sql.query<MessageSqlRow>(
+      `SELECT ${MESSAGE_SELECT_COLUMNS},
+              (SELECT COUNT(*)::int FROM message child
+               WHERE child.parent_id = message.id AND child.deleted_at IS NULL
+                 AND child.account_id IS NOT NULL) AS reply_count
+       FROM message
+       WHERE ${filters.join(' AND ')}
+       ORDER BY ${orderBy}
+       LIMIT $1`,
+      params,
     );
     return rows.map((row) => ({
       ...mapMessageRow(row),

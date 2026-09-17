@@ -4,7 +4,11 @@ import { decodeBolt11 } from '@/lib/bolt11';
 import { LN_ADDRESS_CACHE_TTL_MS } from '@/lib/config';
 import type { FetchFn } from '@/lib/lnurlp';
 import { unsignedNostrDefaults, type MessageRow } from '@/lib/message';
-import { InMemoryMessageStore, type MessageInvoiceAttempt } from '@/lib/message-store';
+import {
+  InMemoryMessageStore,
+  type MessageFeedQuery,
+  type MessageInvoiceAttempt,
+} from '@/lib/message-store';
 import { InMemoryNotificationStore } from '@/lib/notification-store';
 import type { NostrEventFrame } from '@/lib/nostr/query';
 import { RecordingQuerier } from '@/lib/nostr/query';
@@ -989,6 +993,7 @@ describe('indexOpenZapReceipts', () => {
     let getByEventIdCalls = 0;
     const store = {
       listLatest: (limit: number) => base.listLatest(limit),
+      listFeed: (query: MessageFeedQuery) => base.listFeed(query),
       listDebug: (limit: number) => base.listDebug(limit),
       listHidden: (limit: number) => base.listHidden(limit),
       listReplies: (parentId: string, limit?: number) => base.listReplies(parentId, limit),
@@ -1175,6 +1180,7 @@ describe('indexOpenZapReceipts', () => {
       let ingestCalls = 0;
       const store = {
         listLatest: (limit: number) => base.listLatest(limit),
+      listFeed: (query: MessageFeedQuery) => base.listFeed(query),
         listDebug: (limit: number) => base.listDebug(limit),
         listHidden: (limit: number) => base.listHidden(limit),
         listReplies: (parentId: string, limit?: number) => base.listReplies(parentId, limit),
@@ -1458,6 +1464,7 @@ describe('indexOpenZapReceipts', () => {
       });
       const store = {
         listLatest: (limit: number) => base.listLatest(limit),
+      listFeed: (query: MessageFeedQuery) => base.listFeed(query),
         listDebug: (limit: number) => base.listDebug(limit),
         listHidden: (limit: number) => base.listHidden(limit),
         listReplies: (parentId: string, limit?: number) => base.listReplies(parentId, limit),
